@@ -1,0 +1,174 @@
+---
+title: "Final Project"
+author: "TERESA BUI -- 406038900"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(quanteda)
+library(tidytext)
+library(tm)
+library(ggplot2)
+library(textdata)
+library(lubridate)
+```
+
+```{r echo=FALSE}
+## NY Post
+nypost <- read.csv("nypost.csv")
+#View(nypost)
+dim(nypost)
+
+nypost_text <- read.csv("nypost_text.csv")
+#View(nypost_text)
+dim(nypost_text)
+
+#setdiff(nypost$Link, nypost_text2$Link)
+
+all_nypost <- inner_join(nypost, nypost_text)
+dim(all_nypost)
+#View(all_nypost)
+
+clean_dates <- gsub(".* ([A-Za-z]+ \\d{1,2}, \\d{4})", "\\1", all_nypost$Date)
+date_objects <- as.Date(clean_dates, format = c("%b %d, %Y", "%B %d, %Y"))
+formatted_date <- format(date_objects, "%m-%Y") # got the format i want, now time to replace the current date
+all_nypost$Date <- formatted_date
+all_nypost$Link <- NULL
+all_nypost$Source <- "NY Post"
+all_nypost <- all_nypost %>% select(Source, Date, Headline, Description, text)
+
+
+## CNN
+cnn <- read.csv("cnn.csv")
+#View(cnn)
+dim(cnn)
+
+cnn_text <- read.csv("cnn_text.csv")
+#View(cnn_text)
+dim(cnn_text)
+
+#setdiff(cnn$Link, cnn_text$Link) # two links that are not scraped because of the page structure
+
+all_cnn <- inner_join(cnn, cnn_text)
+dim(all_cnn)
+#View(all_cnn)
+
+clean_dates <- gsub(".* ([A-Za-z]+ \\d{1,2}, \\d{4})", "\\1", all_cnn$Date)
+date_objects <- as.Date(clean_dates, format = c("%b %d, %Y", "%B %d, %Y"))
+formatted_date <- format(date_objects, "%m-%Y") # got the format i want, now time to replace the current date
+all_cnn$Date <- formatted_date
+all_cnn$Link <- NULL
+all_cnn$Source <- "CNN"
+all_cnn <- all_cnn %>% select(Source, Date, Headline, Description, text)
+```
+
+
+## Importing data
+
+```{r}
+articles <- read.csv("articles.csv")
+#View(articles)
+dim(articles)
+```
+
+
+## Bi-gram: CNN
+
+```{r message=FALSE}
+## CNN Bigram
+cnn.bigram <- all_cnn %>% unnest_tokens(bigram, text, token = "ngrams", n=2)
+cnn.bigram.counts <- cnn.bigram %>% count(bigram, sort = TRUE)
+head(cnn.bigram.counts)
+
+# Negation Words
+negate_words <- c("not", "without", "no", "can't", "don't", "won't", "never")
+
+# Removing stop words
+cnn.separated <- cnn.bigram %>% separate(bigram, c("word1", "word2"), sep = " ")
+cnn.filtered <- cnn.separated %>% filter(!word1 %in% stop_words$word) %>%
+filter(!word2 %in% stop_words$word) %>% filter(!word1 %in% "cnn") %>% filter(!word2 %in% "cnn")
+head(cnn.filtered)
+
+cnn.bigram2 <- cnn.filtered %>% unite(bigram, word1, word2, sep = " ")
+head(cnn.bigram2)
+
+# by counts
+cnn.bigram2 %>%
+  count(bigram, sort = TRUE) %>%
+  top_n(10) %>%
+  mutate(bigram = reorder(bigram, n)) %>%  
+  ggplot(aes(bigram, n)) + geom_col(fill = "#bdd7e7") + labs(y = "Counts", title = "CNN") + coord_flip() + theme_minimal()
+
+
+cnn.count <- cnn.separated %>% count(word1, word2, sort = TRUE)
+cnn.count %>%
+  filter(word1 %in% negate_words) %>%
+  count(word1, word2, wt = n, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  mutate(contribution = value * n* -1,
+         sentiment = ifelse(contribution < 0, "Negative", "Positive")) %>%
+  group_by(word1) %>% 
+  slice_max(abs(contribution), n = 10) %>%
+  ungroup() %>%
+  ggplot(aes(contribution, word2, fill = sentiment)) +  # Use the newly created sentiment column
+  geom_col(show.legend = FALSE) + 
+  facet_wrap(~ word1, scales = "free", nrow = 3) + 
+  scale_fill_manual(values = c("Positive" = "paleturquoise2", "Negative" = "lightcoral")) +  # Specify colors for positive and negative contributions
+  scale_y_reordered() +
+  labs(x = "Sentiment value * # of occurrences",
+       y = "Words preceded by a negation", title = "CNN") +theme_minimal()
+
+  
+
+```
+
+## Bi-gram: NY
+
+```{r}
+## NY Post Bigram
+ny.bigram <- all_nypost %>% unnest_tokens(bigram, text, token = "ngrams", n=2)
+ny.bigram.counts <- ny.bigram %>% count(bigram, sort = TRUE)
+head(ny.bigram.counts)
+
+# Removing stop words
+ny.separated <- ny.bigram %>% separate(bigram, c("word1", "word2"), sep = " ")
+ny.filtered <- ny.separated %>% filter(!word1 %in% stop_words$word) %>%
+filter(!word2 %in% stop_words$word)
+head(ny.filtered)
+
+ny.bigram2 <- ny.filtered %>% unite(bigram, word1, word2, sep = " ")
+head(ny.bigram2)
+
+ny.bigram2 %>%
+  count(bigram, sort = TRUE) %>%
+  top_n(10) %>%
+  mutate(bigram = reorder(bigram, n)) %>%  
+  ggplot(aes(bigram, n)) +
+  geom_col(fill = "#bdd7e7") +
+  labs(y = "Counts", title = "NY Post") +
+  coord_flip() +
+  theme_minimal()
+
+ny.count <- ny.separated %>% count(word1, word2, sort = TRUE)
+ny.count %>%
+  filter(word1 %in% negate_words) %>%
+  count(word1, word2, wt = n, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+  mutate(contribution = value * n * -1,
+         sentiment = ifelse(contribution < 0, "Negative", "Positive")) %>%
+  group_by(word1) %>% 
+  slice_max(abs(contribution), n = 10) %>%
+  ungroup() %>%
+  ggplot(aes(contribution, word2, fill = sentiment)) +  # Use the newly created sentiment column
+  geom_col(show.legend = FALSE) + 
+  facet_wrap(~ word1, scales = "free", nrow = 3) + 
+  scale_fill_manual(values = c("Positive" = "paleturquoise2", "Negative" = "lightcoral")) +  # Specify colors for positive and negative contributions
+  scale_y_reordered() +
+  labs(x = "Sentiment value * # of occurrences",
+       y = "Words preceded by a negation", title = "NY Post") +theme_minimal()
+
+```
+

@@ -1,0 +1,346 @@
+---
+title: "Trump News Analysis"
+author: "andrew arteaga"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(Rgraphviz)
+library(syuzhet)
+library(pdftools)
+library(reshape2)
+library(wordcloud)
+require(readtext)
+library(MASS)
+library(gutenbergr)
+library(wordcloud2)
+library(scales)
+library(topicmodels)
+library(stringr)
+library(readxl)
+library(caTools)
+library(randomForest)
+library(caret)
+library(plotly)
+library(wordcloud2)
+```
+
+
+**Here's the data ** 
+```{r Read in data}
+#Reading in the first cnn csv file, contains link, headline, date, and a short description
+cnn <- read.csv("cnn.csv")
+
+#View(cnn) wanted to see what the data looked like 
+
+#Reading the second csv file in, contains link and the text of the article
+cnn2 <- read.csv("cnn_text.csv")
+
+#creating a complete cnn df by joining from link 
+cnn_complete <- cnn %>% inner_join(cnn2)
+#View(cnn_complete) quick peak at the data
+
+nypost <- read.csv("nypost.csv")
+#View(nypost)  Have to adjust the data to have month year in this following format 00 - 00
+
+nypost2 <- read.csv("nypost_text2.csv")
+
+
+nypost_complete <- nypost %>% inner_join(nypost2, by = c("Link" = "url"))
+View(nypost_complete)
+```
+
+**Now that the data has been read in, let's manipulate and edit it to get it to where we want **
+
+```{r Manipulating the data}
+#Add a column that contains the source of each article 
+cnn_complete$Source <- "CNN"
+nypost_complete$Source <- "NYPost"
+
+#Remove URL, honestly not very important information
+cnn_complete$Link <- NULL
+nypost_complete$Link <- NULL
+
+#Wanted to change variable order so text was last rather than source 
+cnn_complete <- cnn_complete %>% dplyr::select(Source, Date, Headline, Description, text)
+nypost_complete <- nypost_complete %>% dplyr::select(Source, Date, Headline, Description, text)
+
+#Need to reformat the dates to all be DD -- YYYY
+
+articles <- rbind(cnn_complete, nypost_complete) # create main data frame
+clean_dates <- gsub(".* ([A-Za-z]+ \\d{1,2}, \\d{4})", "\\1", articles$Date)
+date_objects <- as.Date(clean_dates, format = c("%b %d, %Y", "%B %d, %Y"))
+formatted_date <- format(date_objects, "%m-%Y") # got the format i want, now time to replace the current date
+articles$Date <- formatted_date
+
+#writing out the new data frame to send to the group 
+write.csv(articles, "articles.csv")
+```
+
+
+**Data ready, lets do some analysis**
+```{r}
+articles <- read.csv("articles.csv")
+articles <- articles[-c(1785, 1880, 1247), ]
+
+#Dee how many articles per month for each source 
+cnn_dist <- articles %>% 
+  filter(Source == "CNN") %>% 
+  count(Date) 
+#want to have it in chronological order
+custom_order <- c("08-2023", "09-2023", "10-2023", "11-2023", "12-2023", "01-2024", "02-2024", "03-2024")
+cnn_dist$Date <- factor(cnn_dist$Date, levels = custom_order)
+
+cnn_dist_plot <- ggplot(cnn_dist, aes(x = Date, y = n))+
+  geom_col(fill = "steelblue4") + 
+  theme_minimal() + 
+  labs(y = "Number of Articles", x = "Date", title = "CNN")
+
+cnn_dist_plot
+
+######################################################## 
+#NY Post 
+ny_dist <- articles %>% 
+  filter(Source == "NYPost") %>% 
+  count(Date) 
+#want to have it in chronological order
+ny_dist
+#The dates from the ny post articles are only from march to august last year, any  analysis based on time isn't going to be insightful as the dates don't overlap very much thought there would be a pattern of more articles during election year but we dont have that data available for ny post 
+
+#still plot it 
+ny_dist_plot <- ggplot(ny_dist, aes(x = Date, y = n))+
+  geom_col(fill = "steelblue4") + 
+  theme_minimal() + 
+  labs(y = "Number of Articles", x = "Date", title = "NY Post")
+
+ny_dist_plot
+```
+
+**Some deeper analysis and cleaning, we'll start with a corpus and make it tidy** 
+```{r Source Classification}
+corpus <- Corpus(VectorSource(articles$text))
+clean_corpus <- tm_map(corpus, tolower)
+clean_corpus <- tm_map(clean_corpus, removePunctuation)
+clean_corpus <- tm_map(clean_corpus, removeWords, stopwords("english"))
+clean_corpus <- tm_map(clean_corpus, removeWords, c("cnn", "cnnssrs", "cnbc"))
+clean_corpus <- tm_map(clean_corpus, stripWhitespace)
+clean_corpus <- tm_map(clean_corpus, stemDocument)
+article_dtm <- DocumentTermMatrix(clean_corpus)
+sparse_dtm <- removeSparseTerms(article_dtm, .995)
+tsparse <- as.data.frame(as.matrix(sparse_dtm))
+colnames(tsparse) <- make.names(colnames(tsparse))
+tsparse$Source <- articles$Source
+
+# now we build the model 
+set.seed(005432796)
+tsparse <- tsparse[sample(nrow(tsparse)), ]
+my_split <- sample.split(tsparse$Source, SplitRatio = .7)
+train <- subset(tsparse, my_split == TRUE)
+test <- subset(tsparse, my_split == FALSE)
+
+train$Source <- as.factor(train$Source)
+test$Source  <- as.factor(test$Source)
+set.seed(005432796)
+RF_model <- randomForest(Source ~ ., data = train)
+
+#checking our baseline, predicting all the same value right now will give us about 50% error so need soemthing well above that
+table(train$Source)
+table(test$Source)
+
+
+train_predictions <- predict(RF_model)
+table(train$Source, train_predictions)
+train_accuracy <- (642 + 669) / (1396)
+train_accuracy 
+#Really good accuracy on the training data, lets see how it performed on the testing
+
+test_predictions <- predict(RF_model, newdata = test)
+table(test$Source, test_predictions)
+test_accuracy <- (273 + 287) / (598)
+test_accuracy 
+#HOLYYY 93.64% ACCURACY ON SOURCE CLASSIFICATION! THAT'S INSANE! Word usage varies enough that we can determine which words come from which source!! 
+#REALLY GOOD ACCURACY HERE, HOW WILL I PUT THIS ON THE SLIDES WE'LL FIGURE THAT OUT 
+
+conf_matrix <- as.matrix(table(test$Source, test_predictions))
+conf_df <- as.data.frame(conf_matrix)
+conf_df
+colnames(conf_df) <- c("Predicted", "Actual", "Count")
+
+
+test_result_plot <- ggplot(data = conf_df, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "paleturquoise2") +
+  theme_minimal() +
+  labs(title = "Test Confusion Matrix",
+       x = "Predicted Class",
+       y = "Actual Class")
+test_result_plot
+
+```
+
+
+**Vocabulary analysis**
+```{r}
+#Getting the vocab density for each source 
+temp <- tsparse[, -ncol(tsparse)]
+unique_terms <- apply(temp, 1, function(x) {sum(x > 0)})
+total_terms <- rowSums(temp)
+
+#Calculated vocab density for each document so we can determine if there is a difference between each source 
+vocab_density <- unique_terms / total_terms
+
+articles_vdensity <- data.frame(Source = tsparse$Source, Vocabulary_Density = vocab_density, Unique_Terms = unique_terms, Total_Terms = total_terms)
+
+cnn_vocab_summary <- articles_vdensity %>% 
+  filter(Source == "CNN") %>% 
+  dplyr::select(Vocabulary_Density) %>% 
+  summary()
+
+
+ny_vocab_summary <- articles_vdensity %>% 
+  filter(Source == "NYPost") %>%
+  dplyr::select(Vocabulary_Density) %>% 
+  summary()
+
+vocab_plot <- ggplot(articles_vdensity, aes(x = Source, y = Vocabulary_Density)) +
+  geom_boxplot(fill = "paleturquoise2", coef = 1.5) +
+  labs(x = "Source", y = "Vocabulary Density") +
+  theme_minimal()
+
+articles_vdensity %>% 
+  filter(Source == "CNN") %>%
+  dplyr::select(Unique_Terms) %>% 
+  unlist() %>% 
+  mean()
+
+articles_vdensity %>% 
+  filter(Source == "NYPost") %>%
+  dplyr::select(Unique_Terms) %>% 
+  unlist() %>% 
+  mean()
+
+articles_vdensity %>% 
+  filter(Source == "CNN") %>%
+  dplyr::select(Total_Terms) %>% 
+  unlist() %>% 
+  mean()
+
+articles_vdensity %>% 
+  filter(Source == "NYPost") %>%
+  dplyr::select(Total_Terms) %>% 
+  unlist() %>% 
+  mean()
+
+
+ny_vocab_summary
+cnn_vocab_summary
+```
+
+**Sentiment Analysis of Headlines + Text** 
+```{r}
+prop_cnn <- articles %>% 
+  filter(Source == "CNN")
+
+cnn_nrc <- prop_cnn$text %>% get_nrc_sentiment()
+
+
+
+cnn_pie <- data.frame(emotion = names(sort(colSums(prop.table(cnn_nrc[, 9:10])))),
+proportion = colSums(prop.table(cnn_nrc[, 9:10]))) %>%
+  ggplot(aes(x = "", y = proportion, fill = emotion)) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Blues") + 
+  theme_minimal() + 
+  labs(title = "CNN Emotion Proportion")
+props_cnn <- colSums(prop.table(cnn_nrc[, 9:10]))
+props_cnn
+cnn_pie #looks like there is more positive than negative(INTERESTING FINDING)
+
+prop_ny <- articles %>% 
+  filter(Source == "NYPost")
+
+ny_nrc <- prop_ny$text %>% get_nrc_sentiment()
+ny_pie <- data.frame(emotion = names(sort(colSums(prop.table(ny_nrc[, 9:10])))),
+proportion = colSums(prop.table(ny_nrc[, 9:10]))) %>%
+  ggplot(aes(x = "", y = proportion, fill = emotion)) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Blues") + 
+  theme_minimal() + 
+  labs(title = "NY Post Emotion Proportion")
+
+props_ny <- colSums(prop.table(ny_nrc[, 9:10]))
+props_ny
+ny_pie #INTERESTINGGGG LOOKS ABOUT THE SAME 
+
+
+####### TIME TO LOOK AT HEADLINES 
+
+
+cnn_nrc_headline <- prop_cnn$Headline %>% get_nrc_sentiment()
+c_head_prop <- colSums(prop.table(cnn_nrc_headline[, 9:10]))
+
+cnn_pie_headline <- data.frame(emotion = names(cnn_nrc_headline[, 9:10]),
+proportion = c_head_prop) %>%
+  ggplot(aes(x = "", y = proportion, fill = emotion)) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Blues") + 
+  theme_minimal() + 
+  labs(title = "CNN Headline Emotion Proportion")
+
+
+cnn_pie_headline
+
+ny_nrc_headline <- prop_ny$Headline %>% get_nrc_sentiment()
+ny_head_prop <- colSums(prop.table(ny_nrc_headline[, 9:10]))
+
+ny_pie_headline <- data.frame(emotion = names(ny_nrc_headline[, 9:10]),
+proportion = ny_head_prop ) %>%
+  ggplot(aes(x = "", y = proportion, fill = emotion)) + 
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Blues") + 
+  theme_minimal() + 
+  labs(title = "NY Post Headline Emotion Proportion")
+
+ny_pie_headline
+
+ny_head_prop
+c_head_prop
+```
+
+**Done with initial look at the sentiment, will do more looking with bi grams potentially, now for some word frequency** 
+```{r}
+tokens <- articles %>% unnest_tokens(word, text) %>% anti_join(stop_words)
+colnames(tokens) <- c("Article", "Source", "Date", "Headline", "Description", "word")
+#removing some words that dont have meaning 
+remove_words <- c("cnn", "it's", "told")
+
+tokens <- tokens %>% filter(!word %in% remove_words)
+
+count_cnn <- tokens %>%
+  count(Source, word, sort = TRUE) %>% 
+  filter(Source == "CNN") %>% 
+  dplyr::select(word, n) %>% 
+  head(n = 50)
+
+
+tfig <- system.file("examples/t.png", package = "wordcloud2")
+
+wordcloud2(count_cnn, figPath = tfig, size = .5, color = "skyblue")
+
+```
+
+
+
+
+
+
+
